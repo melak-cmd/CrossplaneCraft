@@ -1,0 +1,204 @@
+---
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: eaas-namespace
+spec:
+  writeConnectionSecretsToNamespace: crossplane-connections
+  compositeTypeRef:
+    apiVersion: eaas.konflux-ci.dev/v1alpha1
+    kind: XNamespace
+  mode: Pipeline
+  pipeline:
+    - step: create-namespace
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            ---
+            apiVersion: meta.gotemplating.fn.crossplane.io/v1alpha1
+            kind: ExtraResources
+            requirements:
+              cluster:
+                apiVersion: kubernetes.crossplane.io/v1alpha1
+                kind: ProviderConfig
+                matchName: eaas-kubernetes-provider-config
+
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: namespace
+            spec:
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    labels:
+                      konflux-ci.dev/namespace-type: eaas
+              providerConfigRef:
+                name: eaas-kubernetes-provider-config
+
+            ---
+            {{- $extra := dig "extraResources" "cluster" "items" (list dict) . }}
+
+            apiVersion: meta.gotemplating.fn.crossplane.io/v1alpha1
+            kind: Context
+            data:
+              namespace: {{ .observed.resources.namespace.resource.metadata.name }}
+              apiServer: {{ dig "resource" "metadata" "annotations" "eaas.konflux-ci.dev/api-server" "" (first $extra) }}
+
+    - step: create-serviceaccount
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: serviceaccount
+            spec:
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: ServiceAccount
+                  metadata:
+                    name: namespace-manager
+                    namespace: {{ .context.namespace }}
+              providerConfigRef:
+                name: eaas-kubernetes-provider-config
+
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: rolebinding
+            spec:
+              forProvider:
+                manifest:
+                  apiVersion: rbac.authorization.k8s.io/v1
+                  kind: RoleBinding
+                  metadata:
+                    name: namespace-manager-edit
+                    namespace: {{ .context.namespace }}
+                  subjects:
+                    - kind: ServiceAccount
+                      name: namespace-manager
+                      namespace: {{ .context.namespace }}
+                  roleRef:
+                    kind: ClusterRole
+                    name: edit
+                    apiGroup: rbac.authorization.k8s.io
+              providerConfigRef:
+                name: eaas-kubernetes-provider-config
+
+            ---
+            apiVersion: meta.gotemplating.fn.crossplane.io/v1alpha1
+            kind: Context
+            data:
+              serviceaccount: {{ .observed.resources.serviceaccount.resource.spec.forProvider.manifest.metadata.name }}
+
+    - step: create-serviceaccount-secret
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            {{- $ns := .context.namespace }}
+            {{- $sa := .context.serviceaccount }}
+
+            ---
+            apiVersion: kubernetes.crossplane.io/v1alpha2
+            kind: Object
+            metadata:
+              annotations:
+                gotemplating.fn.crossplane.io/composition-resource-name: secret
+            spec:
+              forProvider:
+                manifest:
+                  apiVersion: v1
+                  kind: Secret
+                  metadata:
+                    name: {{ $sa }}
+                    namespace: {{ $ns }}
+                    annotations:
+                      kubernetes.io/service-account.name: {{ $sa }}
+                  type: kubernetes.io/service-account-token
+              connectionDetails:
+                - apiVersion: v1
+                  kind: Secret
+                  name: {{ $sa }}
+                  namespace: {{ $ns }}
+                  fieldPath: data.token
+                  toConnectionSecretKey: token
+              providerConfigRef:
+                name: eaas-kubernetes-provider-config
+              writeConnectionSecretToRef:
+                name: {{ .observed.composite.resource.metadata.name }}
+                namespace: crossplane-connections
+
+            ---
+            {{- $token := dig "observed" "resources" "secret" "connectionDetails" "token" "" . }}
+
+            apiVersion: meta.gotemplating.fn.crossplane.io/v1alpha1
+            kind: Context
+            data:
+              token: {{ $token }}
+              kubeconfig: |
+                apiVersion: v1
+                kind: Config
+                clusters:
+                  - name: eaas-cluster
+                    cluster:
+                      server: {{ .context.apiServer }}
+                contexts:
+                  - context:
+                      cluster: eaas-cluster
+                      namespace: {{ .context.namespace }}
+                      user: {{ .context.serviceaccount }}
+                    name: default
+                users:
+                  - name: {{ .context.serviceaccount }}
+                    user:
+                      token: {{ $token | b64dec }}
+                current-context: default
+                preferences: {}
+
+    - step: create-connection-details
+      functionRef:
+        name: function-go-templating
+      input:
+        apiVersion: gotemplating.fn.crossplane.io/v1beta1
+        kind: GoTemplate
+        source: Inline
+        inline:
+          template: |
+            ---
+            apiVersion: meta.gotemplating.fn.crossplane.io/v1alpha1
+            kind: CompositeConnectionDetails
+            data:
+              api-server: {{ .context.apiServer | b64enc }}
+              namespace: {{ .context.namespace | b64enc }}
+              serviceaccount: {{ .context.serviceaccount | b64enc }}
+              kubeconfig: {{ .context.kubeconfig | toString | b64enc }}
+              token: {{ .context.token }}
+
+    - step: auto-detect-ready-composed-resources
+      functionRef:
+        name: function-auto-ready

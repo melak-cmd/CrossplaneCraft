@@ -1,0 +1,32 @@
+---
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: provider-kubernetes-runtime-config
+spec:
+  deploymentTemplate:
+    spec:
+      selector: {}
+      template:
+        spec:
+          securityContext:
+            runAsUser: null
+            runAsGroup: null
+          containers:
+            - name: package-runtime
+              securityContext:
+                runAsUser: null
+                runAsGroup: null
+              args:
+                - '--sanitize-secrets'
+                - '--debug'
+
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-kubernetes
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/provider-kubernetes:v0.15.0
+  runtimeConfigRef:
+    name: provider-kubernetes-runtime-config
